@@ -1,0 +1,15 @@
+Source: postgresql-hll-9.4
+Section: database
+Priority: optional
+Maintainer: Groestl <groestl@code.fm>
+Build-Depends: debhelper (>= 9), postgresql-server-dev-9.4
+Standards-Version: 3.9.3
+Homepage: https://github.com/aggregateknowledge/postgresql-hll
+
+Package: postgresql-hll-9.4
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, postgresql-9.4
+Description: postgresql hll extension
+  This Postgres module introduces a new data type hll which is a 
+  HyperLogLog data structure. HyperLogLog is a fixed-size, set-like
+  structure used for distinct value counting with tunable precision.

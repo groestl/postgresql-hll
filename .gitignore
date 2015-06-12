@@ -1,3 +1,7 @@
 *.o
 *.so
 *.out
+debian/files
+debian/postgresql-hll-9.4.debhelper.log
+debian/postgresql-hll-9.4.substvars
+debian/postgresql-hll-9.4/
