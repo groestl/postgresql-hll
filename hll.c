@@ -33,6 +33,8 @@
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "catalog/pg_type.h"
+#include "lib/stringinfo.h"
+#include "libpq/pqformat.h"
 
 #include "MurmurHash3.h"
 
@@ -369,31 +371,70 @@ typedef struct
 static void
 bitstream_pack(bitstream_write_cursor_t * bwcp, uint32_t val)
 {
-    // Fetch the quadword where our data goes.
-    uint64_t qw = * (uint64_t *) bwcp->bwc_curp;
+    size_t bits_left_in_first_byte = 8 - bwcp->bwc_used;
+    size_t bits_to_write_after_first_byte = bwcp->bwc_nbits - bits_left_in_first_byte;
+    size_t full_bytes_to_write = bits_to_write_after_first_byte / 8;
+    size_t remainder_bits_after_full_bytes = bits_to_write_after_first_byte % 8;
 
-    // Swap the bytes.
-    qw = bswap_64(qw);
-
-    // Shift our bits into place and combine.
-    qw |= ((uint64_t) val << (64 - bwcp->bwc_nbits - bwcp->bwc_used));
-
-    // Swap the bytes back again.
-    qw = bswap_64(qw);
-
-    // Write the word back out.
-    * (uint64_t *) bwcp->bwc_curp = qw;
-
-    // We've used some more bits now.
-    bwcp->bwc_used += bwcp->bwc_nbits;
-
-    // Normalize the cursor.
-    while (bwcp->bwc_used >= 8)
+    // write is small enough that it fits in current byte's remaining space with
+    // room to spare, so pad the bottom of the byte by left-shifting
+    if (bwcp->bwc_nbits < bits_left_in_first_byte)
     {
-        bwcp->bwc_used -= 8;
-        bwcp->bwc_curp += 1;
+        * bwcp->bwc_curp = (* bwcp->bwc_curp) | ((uint8_t)(val << (bits_left_in_first_byte - bwcp->bwc_nbits)));
+
+        // consume part of the byte and exit
+        bwcp->bwc_used += bwcp->bwc_nbits;
+        return;
     }
 
+    // write fits exactly in current byte's remaining space, so just OR it in to
+    // the bottom bits of the byte
+    if (bwcp->bwc_nbits == bits_left_in_first_byte)
+    {
+        * bwcp->bwc_curp = (* bwcp->bwc_curp) | (uint8_t)(val);
+
+        // consume remainder of byte and exit
+        bwcp->bwc_used = 0;
+        bwcp->bwc_curp += 1;
+        return;
+    }
+
+    // write DOES NOT fit into current byte, so shift off all but the topmost
+    // bits from the value and OR those into the bottom bits of the byte
+    /* bwcp->bwc_nbits > bits_left_in_first_byte */
+    * bwcp->bwc_curp = (* bwcp->bwc_curp) | ((uint8_t)(val >> (bwcp->bwc_nbits - bits_left_in_first_byte)));
+
+    // consume remainder of byte
+    bwcp->bwc_used = 0;
+    bwcp->bwc_curp += 1;
+
+    // if there are 8 or more bits of the value left to write, write them in one
+    // byte chunks, higher chunks first
+    if (full_bytes_to_write > 0)
+    {
+        for (size_t i = 0; i < full_bytes_to_write; ++i)
+        {
+            size_t bits_to_keep = bits_left_in_first_byte + (8 * (i + 1));
+            size_t right_shift = (bwcp->bwc_nbits - bits_to_keep);
+
+            // no OR here because byte is guaranteed to be completely unused
+            // see above, before conditional
+            * bwcp->bwc_curp = (uint8_t)(val >> right_shift);
+
+            // consume entire byte
+            bwcp->bwc_used = 0;
+            bwcp->bwc_curp += 1;
+        }
+    }
+    if (remainder_bits_after_full_bytes > 0)
+    {
+        uint8_t mask = (1 << remainder_bits_after_full_bytes) - 1;
+        // no OR here because byte is guaranteed to be completely unused
+        * bwcp->bwc_curp = ((uint8_t)val & mask) << (8 - remainder_bits_after_full_bytes);
+
+        // consume part of the byte
+        bwcp->bwc_used = remainder_bits_after_full_bytes;
+    }
 }
 
 static void
@@ -2227,13 +2268,12 @@ hll_type(PG_FUNCTION_ARGS)
     size_t asz;
     multiset_t	msa;
     uint8_t type;
-    uint8_t vers;
 
     ab = PG_GETARG_BYTEA_P(0);
     asz = VARSIZE(ab) - VARHDRSZ;
 
     // Unpack the multiset.
-    vers = multiset_unpack(&msa, (uint8_t *) VARDATA(ab), asz, &type);
+    multiset_unpack(&msa, (uint8_t *) VARDATA(ab), asz, &type);
 
 	PG_RETURN_INT32(type);
 }
@@ -2248,13 +2288,12 @@ hll_log2m(PG_FUNCTION_ARGS)
     bytea * ab;
     size_t asz;
     multiset_t	msa;
-    uint8_t vers;
 
     ab = PG_GETARG_BYTEA_P(0);
     asz = VARSIZE(ab) - VARHDRSZ;
 
     // Unpack the multiset.
-    vers = multiset_unpack(&msa, (uint8_t *) VARDATA(ab), asz, NULL);
+    multiset_unpack(&msa, (uint8_t *) VARDATA(ab), asz, NULL);
 
 	PG_RETURN_INT32(msa.ms_log2nregs);
 }
@@ -2269,13 +2308,12 @@ hll_regwidth(PG_FUNCTION_ARGS)
     bytea * ab;
     size_t asz;
     multiset_t	msa;
-    uint8_t vers;
 
     ab = PG_GETARG_BYTEA_P(0);
     asz = VARSIZE(ab) - VARHDRSZ;
 
     // Unpack the multiset.
-    vers = multiset_unpack(&msa, (uint8_t *) VARDATA(ab), asz, NULL);
+    multiset_unpack(&msa, (uint8_t *) VARDATA(ab), asz, NULL);
 
 	PG_RETURN_INT32(msa.ms_nbits);
 }
@@ -2290,7 +2328,6 @@ hll_expthresh(PG_FUNCTION_ARGS)
     bytea * ab;
     size_t asz;
     multiset_t	msa;
-    uint8_t vers;
 
     size_t nbits;
     size_t nregs;
@@ -2304,7 +2341,7 @@ hll_expthresh(PG_FUNCTION_ARGS)
     asz = VARSIZE(ab) - VARHDRSZ;
 
     // Unpack the multiset.
-    vers = multiset_unpack(&msa, (uint8_t *) VARDATA(ab), asz, NULL);
+    multiset_unpack(&msa, (uint8_t *) VARDATA(ab), asz, NULL);
 
     nbits = msa.ms_nbits;
     nregs = msa.ms_nregs;
@@ -2350,13 +2387,12 @@ hll_sparseon(PG_FUNCTION_ARGS)
     bytea * ab;
     size_t asz;
     multiset_t	msa;
-    uint8_t vers;
 
     ab = PG_GETARG_BYTEA_P(0);
     asz = VARSIZE(ab) - VARHDRSZ;
 
     // Unpack the multiset.
-    vers = multiset_unpack(&msa, (uint8_t *) VARDATA(ab), asz, NULL);
+    multiset_unpack(&msa, (uint8_t *) VARDATA(ab), asz, NULL);
 
 	PG_RETURN_INT32(msa.ms_sparseon);
 }
@@ -2814,10 +2850,26 @@ hll_add_trans4(PG_FUNCTION_ARGS)
                 (errcode(ERRCODE_DATA_EXCEPTION),
                  errmsg("hll_add_trans4 outside transition context")));
 
-    // Is the first argument a NULL?
+    // If the first argument is a NULL on first call, init an hll_empty
     if (PG_ARGISNULL(0))
     {
+        int32 log2m = PG_GETARG_INT32(2);
+        int32 regwidth = PG_GETARG_INT32(3);
+        int64 expthresh = PG_GETARG_INT64(4);
+        int32 sparseon = PG_GETARG_INT32(5);
+
         msap = setup_multiset(aggctx);
+
+        check_modifiers(log2m, regwidth, expthresh, sparseon);
+
+        memset(msap, '\0', sizeof(multiset_t));
+
+        msap->ms_type = MST_EMPTY;
+        msap->ms_nbits = regwidth;
+        msap->ms_nregs = 1 << log2m;
+        msap->ms_log2nregs = log2m;
+        msap->ms_expthresh = expthresh;
+        msap->ms_sparseon = sparseon;
     }
     else
     {
@@ -2828,28 +2880,6 @@ hll_add_trans4(PG_FUNCTION_ARGS)
     if (!PG_ARGISNULL(1))
     {
         int64 val = PG_GETARG_INT64(1);
-
-        // Was the first argument uninitialized?
-        if (msap->ms_type == MST_UNINIT)
-        {
-            int32 log2m = PG_GETARG_INT32(2);
-            int32 regwidth = PG_GETARG_INT32(3);
-            int64 expthresh = PG_GETARG_INT64(4);
-            int32 sparseon = PG_GETARG_INT32(5);
-
-            multiset_t	ms;
-
-            check_modifiers(log2m, regwidth, expthresh, sparseon);
-
-            memset(msap, '\0', sizeof(ms));
-
-            msap->ms_type = MST_EMPTY;
-            msap->ms_nbits = regwidth;
-            msap->ms_nregs = 1 << log2m;
-            msap->ms_log2nregs = log2m;
-            msap->ms_expthresh = expthresh;
-            msap->ms_sparseon = sparseon;
-        }
 
         multiset_add(msap, val);
     }
@@ -2877,10 +2907,26 @@ hll_add_trans3(PG_FUNCTION_ARGS)
                 (errcode(ERRCODE_DATA_EXCEPTION),
                  errmsg("hll_add_trans3 outside transition context")));
 
-    // Is the first argument a NULL?
+    // If the first argument is a NULL on first call, init an hll_empty
     if (PG_ARGISNULL(0))
     {
+        int32 log2m = PG_GETARG_INT32(2);
+        int32 regwidth = PG_GETARG_INT32(3);
+        int64 expthresh = PG_GETARG_INT64(4);
+        int32 sparseon = g_default_sparseon;
+
         msap = setup_multiset(aggctx);
+
+        check_modifiers(log2m, regwidth, expthresh, sparseon);
+
+        memset(msap, '\0', sizeof(multiset_t));
+
+        msap->ms_type = MST_EMPTY;
+        msap->ms_nbits = regwidth;
+        msap->ms_nregs = 1 << log2m;
+        msap->ms_log2nregs = log2m;
+        msap->ms_expthresh = expthresh;
+        msap->ms_sparseon = sparseon;
     }
     else
     {
@@ -2891,28 +2937,6 @@ hll_add_trans3(PG_FUNCTION_ARGS)
     if (!PG_ARGISNULL(1))
     {
         int64 val = PG_GETARG_INT64(1);
-
-        // Was the first argument uninitialized?
-        if (msap->ms_type == MST_UNINIT)
-        {
-            int32 log2m = PG_GETARG_INT32(2);
-            int32 regwidth = PG_GETARG_INT32(3);
-            int64 expthresh = PG_GETARG_INT64(4);
-            int32 sparseon = g_default_sparseon;
-
-            multiset_t	ms;
-
-            check_modifiers(log2m, regwidth, expthresh, sparseon);
-
-            memset(msap, '\0', sizeof(ms));
-
-            msap->ms_type = MST_EMPTY;
-            msap->ms_nbits = regwidth;
-            msap->ms_nregs = 1 << log2m;
-            msap->ms_log2nregs = log2m;
-            msap->ms_expthresh = expthresh;
-            msap->ms_sparseon = sparseon;
-        }
 
         multiset_add(msap, val);
     }
@@ -2940,10 +2964,26 @@ hll_add_trans2(PG_FUNCTION_ARGS)
                 (errcode(ERRCODE_DATA_EXCEPTION),
                  errmsg("hll_add_trans2 outside transition context")));
 
-    // Is the first argument a NULL?
+    // If the first argument is a NULL on first call, init an hll_empty
     if (PG_ARGISNULL(0))
     {
+        int32 log2m = PG_GETARG_INT32(2);
+        int32 regwidth = PG_GETARG_INT32(3);
+        int64 expthresh = g_default_expthresh;
+        int32 sparseon = g_default_sparseon;
+
         msap = setup_multiset(aggctx);
+
+        check_modifiers(log2m, regwidth, expthresh, sparseon);
+
+        memset(msap, '\0', sizeof(multiset_t));
+
+        msap->ms_type = MST_EMPTY;
+        msap->ms_nbits = regwidth;
+        msap->ms_nregs = 1 << log2m;
+        msap->ms_log2nregs = log2m;
+        msap->ms_expthresh = expthresh;
+        msap->ms_sparseon = sparseon;
     }
     else
     {
@@ -2954,28 +2994,6 @@ hll_add_trans2(PG_FUNCTION_ARGS)
     if (!PG_ARGISNULL(1))
     {
         int64 val = PG_GETARG_INT64(1);
-
-        // Was the first argument uninitialized?
-        if (msap->ms_type == MST_UNINIT)
-        {
-            int32 log2m = PG_GETARG_INT32(2);
-            int32 regwidth = PG_GETARG_INT32(3);
-            int64 expthresh = g_default_expthresh;
-            int32 sparseon = g_default_sparseon;
-
-            multiset_t	ms;
-
-            check_modifiers(log2m, regwidth, expthresh, sparseon);
-
-            memset(msap, '\0', sizeof(ms));
-
-            msap->ms_type = MST_EMPTY;
-            msap->ms_nbits = regwidth;
-            msap->ms_nregs = 1 << log2m;
-            msap->ms_log2nregs = log2m;
-            msap->ms_expthresh = expthresh;
-            msap->ms_sparseon = sparseon;
-        }
 
         multiset_add(msap, val);
     }
@@ -3003,10 +3021,26 @@ hll_add_trans1(PG_FUNCTION_ARGS)
                 (errcode(ERRCODE_DATA_EXCEPTION),
                  errmsg("hll_add_trans1 outside transition context")));
 
-    // Is the first argument a NULL?
+    // If the first argument is a NULL on first call, init an hll_empty
     if (PG_ARGISNULL(0))
     {
+        int32 log2m = PG_GETARG_INT32(2);
+        int32 regwidth = g_default_regwidth;
+        int64 expthresh = g_default_expthresh;
+        int32 sparseon = g_default_sparseon;
+
         msap = setup_multiset(aggctx);
+
+        check_modifiers(log2m, regwidth, expthresh, sparseon);
+
+        memset(msap, '\0', sizeof(multiset_t));
+
+        msap->ms_type = MST_EMPTY;
+        msap->ms_nbits = regwidth;
+        msap->ms_nregs = 1 << log2m;
+        msap->ms_log2nregs = log2m;
+        msap->ms_expthresh = expthresh;
+        msap->ms_sparseon = sparseon;
     }
     else
     {
@@ -3017,28 +3051,6 @@ hll_add_trans1(PG_FUNCTION_ARGS)
     if (!PG_ARGISNULL(1))
     {
         int64 val = PG_GETARG_INT64(1);
-
-        // Was the first argument uninitialized?
-        if (msap->ms_type == MST_UNINIT)
-        {
-            int32 log2m = PG_GETARG_INT32(2);
-            int32 regwidth = g_default_regwidth;
-            int64 expthresh = g_default_expthresh;
-            int32 sparseon = g_default_sparseon;
-
-            multiset_t	ms;
-
-            check_modifiers(log2m, regwidth, expthresh, sparseon);
-
-            memset(msap, '\0', sizeof(ms));
-
-            msap->ms_type = MST_EMPTY;
-            msap->ms_nbits = regwidth;
-            msap->ms_nregs = 1 << log2m;
-            msap->ms_log2nregs = log2m;
-            msap->ms_expthresh = expthresh;
-            msap->ms_sparseon = sparseon;
-        }
 
         multiset_add(msap, val);
     }
@@ -3066,10 +3078,26 @@ hll_add_trans0(PG_FUNCTION_ARGS)
                 (errcode(ERRCODE_DATA_EXCEPTION),
                  errmsg("hll_add_trans0 outside transition context")));
 
-    // Is the first argument a NULL?
+    // If the first argument is a NULL on first call, init an hll_empty
     if (PG_ARGISNULL(0))
     {
+        int32 log2m = g_default_log2m;
+        int32 regwidth = g_default_regwidth;
+        int64 expthresh = g_default_expthresh;
+        int32 sparseon = g_default_sparseon;
+
         msap = setup_multiset(aggctx);
+
+        check_modifiers(log2m, regwidth, expthresh, sparseon);
+
+        memset(msap, '\0', sizeof(multiset_t));
+
+        msap->ms_type = MST_EMPTY;
+        msap->ms_nbits = regwidth;
+        msap->ms_nregs = 1 << log2m;
+        msap->ms_log2nregs = log2m;
+        msap->ms_expthresh = expthresh;
+        msap->ms_sparseon = sparseon;
     }
     else
     {
@@ -3080,28 +3108,6 @@ hll_add_trans0(PG_FUNCTION_ARGS)
     if (!PG_ARGISNULL(1))
     {
         int64 val = PG_GETARG_INT64(1);
-
-        // Was the first argument uninitialized?
-        if (msap->ms_type == MST_UNINIT)
-        {
-            int32 log2m = g_default_log2m;
-            int32 regwidth = g_default_regwidth;
-            int64 expthresh = g_default_expthresh;
-            int32 sparseon = g_default_sparseon;
-
-            multiset_t	ms;
-
-            check_modifiers(log2m, regwidth, expthresh, sparseon);
-
-            memset(msap, '\0', sizeof(ms));
-
-            msap->ms_type = MST_EMPTY;
-            msap->ms_nbits = regwidth;
-            msap->ms_nregs = 1 << log2m;
-            msap->ms_log2nregs = log2m;
-            msap->ms_expthresh = expthresh;
-            msap->ms_sparseon = sparseon;
-        }
 
         multiset_add(msap, val);
     }
@@ -3327,4 +3333,26 @@ hll_ceil_card_unpacked(PG_FUNCTION_ARGS)
         ceilval = (int64) ceil(retval);
         PG_RETURN_INT64(ceilval);
     }
+}
+
+PG_FUNCTION_INFO_V1(hll_recv);
+Datum hll_recv(PG_FUNCTION_ARGS);
+Datum
+hll_recv(PG_FUNCTION_ARGS)
+{
+    Datum dd = DirectFunctionCall1(bytearecv, PG_GETARG_DATUM(0));
+    return dd;
+}
+
+PG_FUNCTION_INFO_V1(hll_send);
+Datum hll_send(PG_FUNCTION_ARGS);
+Datum
+hll_send(PG_FUNCTION_ARGS)
+{
+    Datum dd = PG_GETARG_DATUM(0);
+    bytea* bp = DatumGetByteaP(dd);
+    StringInfoData buf;
+    pq_begintypsend(&buf);
+    pq_sendbytes(&buf, VARDATA(bp), VARSIZE(bp) - VARHDRSZ);
+    PG_RETURN_BYTEA_P(pq_endtypsend(&buf));
 }

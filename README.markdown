@@ -240,7 +240,18 @@ The hashing functions we've made available are listed below:
             <code>hll_hash_text('foobar', 123/*hash seed*/)</code>
         </td>
     </tr>
+    <tr>
+        <td><code>hll_hash_any</code></td>
+        <td><code>any</code></td>
+        <td>
+            <code>hll_hash_any(anyval)</code><br/>
+            <strong>or</strong><br/>
+            <code>hll_hash_any(anyval, 123/*hash seed*/)</code>
+        </td>
+    </tr>
 </table>
+
+**NOTE:** `hll_hash_any` dynamically dispatches to the appropriate type-specific function, which makes it slower than the type-specific ones it wraps. Use it only when the input type is not known beforehand.
 
 So what if you don't want to hash your input?
 
@@ -286,9 +297,7 @@ Explanation of Parameters and Tuning
 
 ### `log2m` ###
 
-The log-base-2 of the number of registers used in the HyperLogLog algorithm. Must be at least 4 and at most 17. This parameter tunes the accuracy of the HyperLogLog structure. The relative error is given by the expression ±1.04/√(2<sup>log2m</sup>). Note that increasing `log2m` by 1 doubles the required storage for the `hll`.
-
-**NOTE:** The restriction of `log2m` to a maximum value of 17 is an implementation tradeoff between performance and general appeal. We are currently unaware of any deployments of HyperLogLog registers that use a `log2m` value greater than 16. If you want access to higher `log2m` values, let us know in the Issues section and we'll see what we can do.
+The log-base-2 of the number of registers used in the HyperLogLog algorithm. Must be at least 4 and at most 31. This parameter tunes the accuracy of the HyperLogLog structure. The relative error is given by the expression ±1.04/√(2<sup>log2m</sup>). Note that increasing `log2m` by 1 doubles the required storage for the `hll`.
 
 ### `regwidth` ###
 
@@ -363,7 +372,7 @@ Build
 
 Specify versions:
 
-    export VER=2.7.1
+    export VER=2.10.0
     export PGSHRT=91
 
 Make sure `Makefile` points to the correct `pg_config` for the specified version, since `rpmbuild` doesn't respect env variables:
@@ -381,11 +390,11 @@ Execute rpmbuild:
 
 Install RPM:
 
-    rpm -Uv rpmbuild/RPMS/x86_64/postgresql91-hll-2.7.1-0.x86_64.rpm
+    rpm -Uv rpmbuild/RPMS/x86_64/postgresql91-hll-2.10.0-0.x86_64.rpm
 
 And if you want the debugging build:
 
-    rpm -Uv rpmbuild/RPMS/x86_64/postgresql91-hll-debuginfo-2.7.1-0.x86_64.rpm
+    rpm -Uv rpmbuild/RPMS/x86_64/postgresql91-hll-debuginfo-2.10.0-0.x86_64.rpm
 
 
 ## From source ##
@@ -475,7 +484,9 @@ For more information on `hll` intersections, see [this blog post](http://blog.ag
 Storage formats
 ===============
 
-`hll`s are stored in the database as byte arrays, which are packed according to the specification in `STORAGE.markdown`. The current specification supports a versioning schema should the need to change the layout, algorithms, or promotion hierarchy arise. (There is currently only one schema version, however.)
+`hll`s are stored in the database as byte arrays, which are packed according to the [storage specification, v1.0.0](https://github.com/aggregateknowledge/hll-storage-spec/blob/v1.0.0/STORAGE.md).
 
-It is a pretty trivial task to export these to and from Postgres and other applications by implementing a serializer/deserializer. We hope to release a Java serialization/deserialization package as well as a naive algorithm wrapper in the near future to allow the development of rich `hll`-based applications outside of Postgres.
+It is a pretty trivial task to export these to and from Postgres and other applications by implementing a serializer/deserializer. We have provided several packages that provide such tools:
 
+* [java-hll](https://github.com/aggregateknowledge/java-hll)
+* [js-hll](https://github.com/aggregateknowledge/js-hll)
