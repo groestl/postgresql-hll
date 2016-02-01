@@ -1,11 +1,11 @@
-postgresql-hll-9.4 (2.10.0-1.xs1) unstable; urgency=low
+postgresql-hll-9.5 (2.10.0-1.xs1) unstable; urgency=low
 
   * Bumped upstream version
 
- -- Groestl <groestl@code.fm>  Mon, 15 Jun 2015 11:39:00 +0200
+ -- Groestl <groestl@code.fm>  Mon, 1 Feb 2016 11:39:00 +0200
 
-postgresql-hll-9.4 (2.7.1-1.xs1) unstable; urgency=low
+postgresql-hll-9.5 (2.7.1-1.xs1) unstable; urgency=low
 
   * Initial import
 
- -- Groestl <groestl@code.fm>  Fri, 12 Jun 2015 18:45:00 +0200
+ -- Groestl <groestl@code.fm>  Mon, 1 Feb 2016 18:45:00 +0200
